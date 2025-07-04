@@ -130,7 +130,11 @@ where
             });
         }
 
+        // workaround: seenpin motors (plugged into my macos machine) is broken over CoE
+        #[cfg(target_os = "linux")]
         let has_coe = self.state.config.mailbox.has_coe;
+        #[cfg(not(target_os = "linux"))]
+        let has_coe = false; // TODO: add automatic parameter
 
         fmt::debug!(
             "SubDevice {:#06x} has CoE: {:?}",
@@ -142,7 +146,7 @@ where
             self.configure_pdos_coe(&sync_managers, &fmmu_usage, direction, &mut global_offset)
                 .await?
         } else {
-            self.configure_pdos_eeprom(&sync_managers, direction, &mut global_offset)
+            self.configure_pdos_eeprom(&sync_managers, &fmmu_usage, direction, &mut global_offset)
                 .await?
         };
 
@@ -437,6 +441,15 @@ where
                 }
             }
 
+            // match direction {
+            //     PdoDirection::MasterRead => {
+            //         sm_bit_len = 16 + 16 + 8 + 8 + 32 + 32 + 16 + 16 + 16;
+            //     }
+            //     PdoDirection::MasterWrite => {
+            //         sm_bit_len = 16 + 32 + 32 + 16 + 8 + 8 + 16;
+            //     }
+            // };
+
             fmt::trace!(
                 "----= total SM bit length {} ({} bytes)",
                 sm_bit_len,
@@ -534,6 +547,7 @@ where
     async fn configure_pdos_eeprom(
         &self,
         sync_managers: &[SyncManager],
+        fmmu_usage: &[FmmuUsage],
         direction: PdoDirection,
         offset: &mut PdiOffset,
     ) -> Result<(PdiSegment, PdoMapping), Error> {
@@ -562,7 +576,7 @@ where
         // let mut total_bit_len = 0;
         let mut pdo_mappings = PdoMapping::default();
 
-        let (sm_type, _fmmu_type) = direction.filter_terms();
+        let (sm_type, desired_fmmu_type) = direction.filter_terms();
 
         for (sync_manager_index, sync_manager) in sync_managers
             .iter()
@@ -604,28 +618,23 @@ where
             let fmmu_index = fmmu_sm_mappings
                 .iter()
                 .find(|fmmu| fmmu.sync_manager == sync_manager_index)
-                .map(|fmmu| fmmu.sync_manager)
+                .map(|fmmu| fmmu.sync_manager as usize)
+                .or_else(|| {
+                    fmt::trace!("Could not find FMMU for PDO SM{} in EEPROM, using FMMU type to pick FMMU instead", sync_manager_index);
+                    fmmu_usage.iter().position(|usage| *usage == desired_fmmu_type)
+                })
                 .unwrap_or_else(|| {
-                    fmt::trace!(
-                        "Could not find FMMU for PDO SM{} in EEPROM, using SM index to pick FMMU instead",
-                        sync_manager_index,
-                    );
-
-                    sync_manager_index
-                });
+                    fmt::trace!("Could not find FMMU type {:?} in available FMMUs, using SM index to pick FMMU instead", desired_fmmu_type);
+                    sync_manager_index as usize
+                }
+            );
 
             let sm_config = self
                 .write_sm_config(sync_manager_index, sync_manager, (bit_len + 7) / 8)
                 .await?;
 
-            self.write_fmmu_config(
-                bit_len,
-                usize::from(fmmu_index),
-                offset,
-                sm_type,
-                &sm_config,
-            )
-            .await?;
+            self.write_fmmu_config(bit_len, fmmu_index, offset, sm_type, &sm_config)
+                .await?;
         }
 
         Ok((
