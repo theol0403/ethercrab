@@ -1,12 +1,13 @@
-use super::{IoRanges, SubDevice, SubDeviceRef};
-use crate::subdevice_group::MySyncUnsafeCell;
+use super::{SubDevice, SubDeviceRef};
+use crate::{pdi::PdoMapping, subdevice_group::MySyncUnsafeCell};
 use core::ops::{Deref, DerefMut, Range};
 use lock_api::{RawRwLock, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 /// Provides a read-only reference to a slice in the PDI
 pub struct PdiReadGuard<'a, const N: usize, R: RawRwLock> {
     lock: RwLockReadGuard<'a, R, MySyncUnsafeCell<[u8; N]>>,
-    range: Range<usize>,
+    range: &'a Range<usize>,
+    pdos: &'a PdoMapping,
 }
 
 impl<const N: usize, R: RawRwLock> Deref for PdiReadGuard<'_, N, R> {
@@ -19,10 +20,18 @@ impl<const N: usize, R: RawRwLock> Deref for PdiReadGuard<'_, N, R> {
     }
 }
 
+impl<const N: usize, R: RawRwLock> PdiReadGuard<'_, N, R> {
+    pub fn pdo_raw(&self, index: u16, sub_index: u8) -> Option<&[u8]> {
+        let range = self.pdos.get(&(index, sub_index))?;
+        Some(&self[range.clone()])
+    }
+}
+
 /// Provides a read-write reference to a slice in the PDI
 pub struct PdiWriteGuard<'a, const N: usize, R: RawRwLock> {
     lock: RwLockWriteGuard<'a, R, MySyncUnsafeCell<[u8; N]>>,
-    range: Range<usize>,
+    range: &'a Range<usize>,
+    pdos: &'a PdoMapping,
 }
 
 impl<const N: usize, R: RawRwLock> Deref for PdiWriteGuard<'_, N, R> {
@@ -41,40 +50,51 @@ impl<const N: usize, R: RawRwLock> DerefMut for PdiWriteGuard<'_, N, R> {
     }
 }
 
-/// Yields read-only references to the input and output segments of the PDI
-pub struct PdiIoRawReadGuard<'a, const N: usize, R: RawRwLock>(&'a SubDevicePdi<'a, N, R>);
+impl<const N: usize, R: RawRwLock> PdiWriteGuard<'_, N, R> {
+    pub fn pdo_raw(&mut self, index: u16, sub_index: u8) -> Option<&mut [u8]> {
+        let range = self.pdos.get(&(index, sub_index))?;
+        Some(&mut self[range.clone()])
+    }
+}
 
-impl<const N: usize, R: RawRwLock> PdiIoRawReadGuard<'_, N, R> {
+/// Yields read-only references to the input and output segments of the PDI
+pub struct PdiIoReadGuard<'a, const N: usize, R: RawRwLock>(&'a SubDevicePdi<'a, N, R>);
+
+impl<const N: usize, R: RawRwLock> PdiIoReadGuard<'_, N, R> {
     pub fn inputs(&self) -> PdiReadGuard<'_, N, R> {
         PdiReadGuard {
             lock: self.0.pdi.read(),
-            range: self.0.config.io.input.bytes.clone(),
+            range: &self.0.config.io.input.bytes,
+            pdos: &self.0.config.io.tx_pdos,
         }
     }
 
     pub fn outputs(&self) -> PdiReadGuard<'_, N, R> {
         PdiReadGuard {
             lock: self.0.pdi.read(),
-            range: self.0.config.io.output.bytes.clone(),
+            range: &self.0.config.io.output.bytes,
+            pdos: &self.0.config.io.rx_pdos,
         }
     }
 }
 
 /// Yields read-only input and read-write output segments of the PDI
-pub struct PdiIoRawWriteGuard<'a, const N: usize, R: RawRwLock>(&'a SubDevicePdi<'a, N, R>);
+pub struct PdiIoWriteGuard<'a, const N: usize, R: RawRwLock>(&'a SubDevicePdi<'a, N, R>);
 
-impl<const N: usize, R: RawRwLock> PdiIoRawWriteGuard<'_, N, R> {
+impl<const N: usize, R: RawRwLock> PdiIoWriteGuard<'_, N, R> {
     pub fn inputs(&self) -> PdiReadGuard<'_, N, R> {
         PdiReadGuard {
             lock: self.0.pdi.read(),
-            range: self.0.config.io.input.bytes.clone(),
+            range: &self.0.config.io.input.bytes,
+            pdos: &self.0.config.io.tx_pdos,
         }
     }
 
     pub fn outputs(&mut self) -> PdiWriteGuard<'_, N, R> {
         PdiWriteGuard {
             lock: self.0.pdi.write(),
-            range: self.0.config.io.output.bytes.clone(),
+            range: &self.0.config.io.output.bytes,
+            pdos: &self.0.config.io.rx_pdos,
         }
     }
 }
@@ -132,8 +152,8 @@ impl<const MAX_PDI: usize, R: RawRwLock> SubDeviceRef<'_, SubDevicePdi<'_, MAX_P
     /// io.outputs()[0] = 0xaa;
     /// # }
     /// ```
-    pub fn io_raw_mut(&self) -> PdiIoRawWriteGuard<'_, MAX_PDI, R> {
-        PdiIoRawWriteGuard(&self.state)
+    pub fn io_raw_mut(&self) -> PdiIoWriteGuard<'_, MAX_PDI, R> {
+        PdiIoWriteGuard(&self.state)
     }
 
     /// Get a reference to both the inputs and outputs for this SubDevice in the Process Data Image
@@ -167,15 +187,16 @@ impl<const MAX_PDI: usize, R: RawRwLock> SubDeviceRef<'_, SubDevicePdi<'_, MAX_P
     /// dbg!(io.outputs()[0]);
     /// # }
     /// ```
-    pub fn io_raw(&self) -> PdiIoRawReadGuard<'_, MAX_PDI, R> {
-        PdiIoRawReadGuard(&self.state)
+    pub fn io_raw(&self) -> PdiIoReadGuard<'_, MAX_PDI, R> {
+        PdiIoReadGuard(&self.state)
     }
 
     /// Get a reference to the raw input data for this SubDevice in the Process Data Image (PDI).
     pub fn inputs_raw(&self) -> PdiReadGuard<'_, MAX_PDI, R> {
         PdiReadGuard {
             lock: self.state.pdi.read(),
-            range: self.state.config.io.input.bytes.clone(),
+            range: &self.state.config.io.input.bytes,
+            pdos: &self.state.config.io.tx_pdos,
         }
     }
 
@@ -183,7 +204,8 @@ impl<const MAX_PDI: usize, R: RawRwLock> SubDeviceRef<'_, SubDevicePdi<'_, MAX_P
     pub fn outputs_raw(&self) -> PdiReadGuard<'_, MAX_PDI, R> {
         PdiReadGuard {
             lock: self.state.pdi.read(),
-            range: self.state.config.io.output.bytes.clone(),
+            range: &self.state.config.io.output.bytes,
+            pdos: &self.state.config.io.rx_pdos,
         }
     }
 
@@ -192,7 +214,8 @@ impl<const MAX_PDI: usize, R: RawRwLock> SubDeviceRef<'_, SubDevicePdi<'_, MAX_P
     pub fn outputs_raw_mut(&self) -> PdiWriteGuard<'_, MAX_PDI, R> {
         PdiWriteGuard {
             lock: self.state.pdi.write(),
-            range: self.state.config.io.output.bytes.clone(),
+            range: &self.state.config.io.output.bytes,
+            pdos: &self.state.config.io.rx_pdos,
         }
     }
 }
@@ -200,7 +223,9 @@ impl<const MAX_PDI: usize, R: RawRwLock> SubDeviceRef<'_, SubDevicePdi<'_, MAX_P
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{MainDevice, MainDeviceConfig, PduStorage, Timeouts, pdi::PdiSegment};
+    use crate::{
+        MainDevice, MainDeviceConfig, PduStorage, Timeouts, pdi::PdiSegment, subdevice::IoRanges,
+    };
 
     #[test]
     fn get_inputs() {
