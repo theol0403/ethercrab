@@ -1,5 +1,9 @@
 use super::{SubDevice, SubDeviceRef};
-use crate::{pdi::PdoMapping, subdevice_group::MySyncUnsafeCell};
+use crate::{
+    error::{Error, Item},
+    pdi::PdoMapping,
+    subdevice_group::MySyncUnsafeCell,
+};
 use core::ops::{Deref, DerefMut, Range};
 use lock_api::{RawRwLock, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
@@ -21,9 +25,12 @@ impl<const N: usize, R: RawRwLock> Deref for PdiReadGuard<'_, N, R> {
 }
 
 impl<const N: usize, R: RawRwLock> PdiReadGuard<'_, N, R> {
-    pub fn pdo_raw(&self, index: u16, sub_index: u8) -> Option<&[u8]> {
-        let range = self.pdos.get(&(index, sub_index))?;
-        Some(&self[range.0 as usize..range.0 as usize + range.1 as usize])
+    pub fn pdo_raw(&self, index: u16, sub_index: u8) -> Result<&[u8], Error> {
+        let range = self.pdos.get(&(index, sub_index)).ok_or(Error::NotFound {
+            item: Item::Pdo,
+            index: Some(index as usize),
+        })?;
+        Ok(&self[range.0 as usize..range.0 as usize + range.1 as usize])
     }
 }
 
@@ -51,9 +58,12 @@ impl<const N: usize, R: RawRwLock> DerefMut for PdiWriteGuard<'_, N, R> {
 }
 
 impl<const N: usize, R: RawRwLock> PdiWriteGuard<'_, N, R> {
-    pub fn pdo_raw(&mut self, index: u16, sub_index: u8) -> Option<&mut [u8]> {
-        let range = self.pdos.get(&(index, sub_index))?;
-        Some(&mut self[range.0 as usize..range.0 as usize + range.1 as usize])
+    pub fn pdo_raw(&mut self, index: u16, sub_index: u8) -> Result<&mut [u8], Error> {
+        let range = self.pdos.get(&(index, sub_index)).ok_or(Error::NotFound {
+            item: Item::Pdo,
+            index: Some(index as usize),
+        })?;
+        Ok(&mut self[range.0 as usize..range.0 as usize + range.1 as usize])
     }
 }
 
