@@ -5,16 +5,17 @@ use crate::{
     subdevice_group::MySyncUnsafeCell,
 };
 use core::ops::{Deref, DerefMut, Range};
-use ethercrab_wire::{EtherCrabWireRead, EtherCrabWireReadSized, EtherCrabWireWrite};
+use ethercrab_wire::{EtherCrabWireRead, EtherCrabWireWrite};
+use lock_api::{RawRwLock, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 /// Provides a read-only reference to a slice in the PDI
-pub struct PdiReadGuard<'a, const N: usize> {
-    lock: spin::RwLockReadGuard<'a, MySyncUnsafeCell<[u8; N]>>,
+pub struct PdiReadGuard<'a, const N: usize, R: RawRwLock> {
+    lock: RwLockReadGuard<'a, R, MySyncUnsafeCell<[u8; N]>>,
     range: &'a Range<usize>,
     pdos: &'a PdoMapping,
 }
 
-impl<const N: usize> Deref for PdiReadGuard<'_, N> {
+impl<const N: usize, R: RawRwLock> Deref for PdiReadGuard<'_, N, R> {
     type Target = [u8];
 
     fn deref(&self) -> &Self::Target {
@@ -24,7 +25,7 @@ impl<const N: usize> Deref for PdiReadGuard<'_, N> {
     }
 }
 
-impl<const N: usize> PdiReadGuard<'_, N> {
+impl<const N: usize, R: RawRwLock> PdiReadGuard<'_, N, R> {
     pub fn pdo_raw(&self, index: u16, sub_index: u8) -> Result<&[u8], Error> {
         let range = self.pdos.get(&(index, sub_index)).ok_or(Error::NotFound {
             item: Item::Pdo,
@@ -42,13 +43,13 @@ impl<const N: usize> PdiReadGuard<'_, N> {
 }
 
 /// Provides a read-write reference to a slice in the PDI
-pub struct PdiWriteGuard<'a, const N: usize> {
-    lock: spin::rwlock::RwLockWriteGuard<'a, MySyncUnsafeCell<[u8; N]>, crate::SpinStrategy>,
+pub struct PdiWriteGuard<'a, const N: usize, R: RawRwLock> {
+    lock: RwLockWriteGuard<'a, R, MySyncUnsafeCell<[u8; N]>>,
     range: &'a Range<usize>,
     pdos: &'a PdoMapping,
 }
 
-impl<const N: usize> Deref for PdiWriteGuard<'_, N> {
+impl<const N: usize, R: RawRwLock> Deref for PdiWriteGuard<'_, N, R> {
     type Target = [u8];
 
     fn deref(&self) -> &Self::Target {
@@ -58,13 +59,13 @@ impl<const N: usize> Deref for PdiWriteGuard<'_, N> {
     }
 }
 
-impl<const N: usize> DerefMut for PdiWriteGuard<'_, N> {
+impl<const N: usize, R: RawRwLock> DerefMut for PdiWriteGuard<'_, N, R> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.lock.get_mut()[self.range.clone()]
     }
 }
 
-impl<const N: usize> PdiWriteGuard<'_, N> {
+impl<const N: usize, R: RawRwLock> PdiWriteGuard<'_, N, R> {
     pub fn pdo_raw(&mut self, index: u16, sub_index: u8) -> Result<&mut [u8], Error> {
         let range = self.pdos.get(&(index, sub_index)).ok_or(Error::NotFound {
             item: Item::Pdo,
@@ -90,10 +91,10 @@ impl<const N: usize> PdiWriteGuard<'_, N> {
 }
 
 /// Yields read-only references to the input and output segments of the PDI
-pub struct PdiIoReadGuard<'a, const N: usize>(&'a SubDevicePdi<'a, N>);
+pub struct PdiIoReadGuard<'a, const N: usize, R: RawRwLock>(&'a SubDevicePdi<'a, N, R>);
 
-impl<const N: usize> PdiIoReadGuard<'_, N> {
-    pub fn inputs(&self) -> PdiReadGuard<'_, N> {
+impl<const N: usize, R: RawRwLock> PdiIoReadGuard<'_, N, R> {
+    pub fn inputs(&self) -> PdiReadGuard<'_, N, R> {
         PdiReadGuard {
             lock: self.0.pdi.read(),
             range: &self.0.config.io.input.bytes,
@@ -101,7 +102,7 @@ impl<const N: usize> PdiIoReadGuard<'_, N> {
         }
     }
 
-    pub fn outputs(&self) -> PdiReadGuard<'_, N> {
+    pub fn outputs(&self) -> PdiReadGuard<'_, N, R> {
         PdiReadGuard {
             lock: self.0.pdi.read(),
             range: &self.0.config.io.output.bytes,
@@ -111,10 +112,10 @@ impl<const N: usize> PdiIoReadGuard<'_, N> {
 }
 
 /// Yields read-only input and read-write output segments of the PDI
-pub struct PdiIoWriteGuard<'a, const N: usize>(&'a SubDevicePdi<'a, N>);
+pub struct PdiIoWriteGuard<'a, const N: usize, R: RawRwLock>(&'a SubDevicePdi<'a, N, R>);
 
-impl<const N: usize> PdiIoWriteGuard<'_, N> {
-    pub fn inputs(&self) -> PdiReadGuard<'_, N> {
+impl<const N: usize, R: RawRwLock> PdiIoWriteGuard<'_, N, R> {
+    pub fn inputs(&self) -> PdiReadGuard<'_, N, R> {
         PdiReadGuard {
             lock: self.0.pdi.read(),
             range: &self.0.config.io.input.bytes,
@@ -122,7 +123,7 @@ impl<const N: usize> PdiIoWriteGuard<'_, N> {
         }
     }
 
-    pub fn outputs(&mut self) -> PdiWriteGuard<'_, N> {
+    pub fn outputs(&mut self) -> PdiWriteGuard<'_, N, R> {
         PdiWriteGuard {
             lock: self.0.pdi.write(),
             range: &self.0.config.io.output.bytes,
@@ -135,15 +136,15 @@ impl<const N: usize> PdiIoWriteGuard<'_, N> {
 ///
 /// Used in conjunction with [`SubDeviceRef`].
 #[doc(alias = "SlavePdi")]
-pub struct SubDevicePdi<'group, const MAX_PDI: usize> {
+pub struct SubDevicePdi<'group, const MAX_PDI: usize, R: RawRwLock> {
     subdevice: &'group SubDevice,
-    pdi: &'group spin::rwlock::RwLock<MySyncUnsafeCell<[u8; MAX_PDI]>, crate::SpinStrategy>,
+    pdi: &'group RwLock<R, MySyncUnsafeCell<[u8; MAX_PDI]>>,
 }
 
-unsafe impl<const MAX_PDI: usize> Send for SubDevicePdi<'_, MAX_PDI> {}
-unsafe impl<const MAX_PDI: usize> Sync for SubDevicePdi<'_, MAX_PDI> {}
+unsafe impl<const MAX_PDI: usize, R: RawRwLock> Send for SubDevicePdi<'_, MAX_PDI, R> {}
+unsafe impl<const MAX_PDI: usize, R: RawRwLock> Sync for SubDevicePdi<'_, MAX_PDI, R> {}
 
-impl<const MAX_PDI: usize> Deref for SubDevicePdi<'_, MAX_PDI> {
+impl<const MAX_PDI: usize, R: RawRwLock> Deref for SubDevicePdi<'_, MAX_PDI, R> {
     type Target = SubDevice;
 
     fn deref(&self) -> &Self::Target {
@@ -151,17 +152,17 @@ impl<const MAX_PDI: usize> Deref for SubDevicePdi<'_, MAX_PDI> {
     }
 }
 
-impl<'group, const MAX_PDI: usize> SubDevicePdi<'group, MAX_PDI> {
+impl<'group, const MAX_PDI: usize, R: RawRwLock> SubDevicePdi<'group, MAX_PDI, R> {
     pub(crate) fn new(
         subdevice: &'group SubDevice,
-        pdi: &'group spin::rwlock::RwLock<MySyncUnsafeCell<[u8; MAX_PDI]>, crate::SpinStrategy>,
+        pdi: &'group RwLock<R, MySyncUnsafeCell<[u8; MAX_PDI]>>,
     ) -> Self {
         Self { subdevice, pdi }
     }
 }
 
 /// Methods used when a SubDevice is part of a group and part of the PDI has been mapped to it.
-impl<const MAX_PDI: usize> SubDeviceRef<'_, SubDevicePdi<'_, MAX_PDI>> {
+impl<const MAX_PDI: usize, R: RawRwLock> SubDeviceRef<'_, SubDevicePdi<'_, MAX_PDI, R>> {
     /// Get a reference to the raw inputs and outputs for this SubDevice in the Process Data Image
     /// (PDI). The inputs are read-only, while the outputs can be mutated.
     ///
@@ -184,7 +185,7 @@ impl<const MAX_PDI: usize> SubDeviceRef<'_, SubDevicePdi<'_, MAX_PDI>> {
     /// io.outputs()[0] = 0xaa;
     /// # }
     /// ```
-    pub fn io_raw_mut(&self) -> PdiIoWriteGuard<'_, MAX_PDI> {
+    pub fn io_raw_mut(&self) -> PdiIoWriteGuard<'_, MAX_PDI, R> {
         PdiIoWriteGuard(&self.state)
     }
 
@@ -219,12 +220,12 @@ impl<const MAX_PDI: usize> SubDeviceRef<'_, SubDevicePdi<'_, MAX_PDI>> {
     /// dbg!(io.outputs()[0]);
     /// # }
     /// ```
-    pub fn io_raw(&self) -> PdiIoReadGuard<'_, MAX_PDI> {
+    pub fn io_raw(&self) -> PdiIoReadGuard<'_, MAX_PDI, R> {
         PdiIoReadGuard(&self.state)
     }
 
     /// Get a reference to the raw input data for this SubDevice in the Process Data Image (PDI).
-    pub fn inputs_raw(&self) -> PdiReadGuard<'_, MAX_PDI> {
+    pub fn inputs_raw(&self) -> PdiReadGuard<'_, MAX_PDI, R> {
         PdiReadGuard {
             lock: self.state.pdi.read(),
             range: &self.state.config.io.input.bytes,
@@ -233,7 +234,7 @@ impl<const MAX_PDI: usize> SubDeviceRef<'_, SubDevicePdi<'_, MAX_PDI>> {
     }
 
     /// Get a reference to the raw output data for this SubDevice in the Process Data Image (PDI).
-    pub fn outputs_raw(&self) -> PdiReadGuard<'_, MAX_PDI> {
+    pub fn outputs_raw(&self) -> PdiReadGuard<'_, MAX_PDI, R> {
         PdiReadGuard {
             lock: self.state.pdi.read(),
             range: &self.state.config.io.output.bytes,
@@ -243,7 +244,7 @@ impl<const MAX_PDI: usize> SubDeviceRef<'_, SubDevicePdi<'_, MAX_PDI>> {
 
     /// Get a mutable reference to the raw output data for this SubDevice in the Process Data Image
     /// (PDI).
-    pub fn outputs_raw_mut(&self) -> PdiWriteGuard<'_, MAX_PDI> {
+    pub fn outputs_raw_mut(&self) -> PdiWriteGuard<'_, MAX_PDI, R> {
         PdiWriteGuard {
             lock: self.state.pdi.write(),
             range: &self.state.config.io.output.bytes,
@@ -282,7 +283,8 @@ mod tests {
 
         const LEN: usize = 64;
 
-        let pdi_storage = spin::rwlock::RwLock::new(MySyncUnsafeCell::new([0xabu8; LEN]));
+        let pdi_storage =
+            RwLock::<crate::DefaultLock, _>::new(MySyncUnsafeCell::new([0xabu8; LEN]));
 
         let pdi = SubDevicePdi::new(&sd, &pdi_storage);
 
